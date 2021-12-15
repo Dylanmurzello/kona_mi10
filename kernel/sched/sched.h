@@ -275,6 +275,8 @@ static inline int task_has_dl_policy(struct task_struct *p)
  */
 #define SCHED_FLAG_SUGOV	0x10000000
 
+#define SCHED_DL_FLAGS (SCHED_FLAG_RECLAIM | SCHED_FLAG_DL_OVERRUN | SCHED_FLAG_SUGOV)
+
 static inline bool dl_entity_is_special(struct sched_dl_entity *dl_se)
 {
 #ifdef CONFIG_CPU_FREQ_GOV_SCHEDUTIL
@@ -313,30 +315,6 @@ struct rt_bandwidth {
 
 void __dl_clear_params(struct task_struct *p);
 
-/*
- * To keep the bandwidth of -deadline tasks and groups under control
- * we need some place where:
- *  - store the maximum -deadline bandwidth of the system (the group);
- *  - cache the fraction of that bandwidth that is currently allocated.
- *
- * This is all done in the data structure below. It is similar to the
- * one used for RT-throttling (rt_bandwidth), with the main difference
- * that, since here we are only interested in admission control, we
- * do not decrease any runtime while the group "executes", neither we
- * need a timer to replenish it.
- *
- * With respect to SMP, the bandwidth is given on a per-CPU basis,
- * meaning that:
- *  - dl_bw (< 100%) is the bandwidth of the system (group) on each CPU;
- *  - dl_total_bw array contains, in the i-eth element, the currently
- *    allocated bandwidth on the i-eth CPU.
- * Moreover, groups consume bandwidth on each CPU, while tasks only
- * consume bandwidth on the CPU they're running on.
- * Finally, dl_total_bw_cpu is used to cache the index of dl_total_bw
- * that will be shown the next time the proc or cgroup controls will
- * be red. It on its turn can be changed by writing on its own
- * control.
- */
 struct dl_bandwidth {
 	raw_spinlock_t		dl_runtime_lock;
 	u64			dl_runtime;
@@ -348,6 +326,24 @@ static inline int dl_bandwidth_enabled(void)
 	return sysctl_sched_rt_runtime >= 0;
 }
 
+/*
+ * To keep the bandwidth of -deadline tasks under control
+ * we need some place where:
+ *  - store the maximum -deadline bandwidth of each cpu;
+ *  - cache the fraction of bandwidth that is currently allocated in
+ *    each root domain;
+ *
+ * This is all done in the data structure below. It is similar to the
+ * one used for RT-throttling (rt_bandwidth), with the main difference
+ * that, since here we are only interested in admission control, we
+ * do not decrease any runtime while the group "executes", neither we
+ * need a timer to replenish it.
+ *
+ * With respect to SMP, bandwidth is given on a per root domain basis,
+ * meaning that:
+ *  - bw (< 100%) is the deadline bandwidth of each CPU;
+ *  - total_bw is the currently allocated bandwidth in each root domain;
+ */
 struct dl_bw {
 	raw_spinlock_t		lock;
 	u64			bw;
@@ -569,6 +565,9 @@ struct cfs_rq {
 
 	u64			exec_clock;
 	u64			min_vruntime;
+#ifdef CONFIG_PERF_HUMANTASK
+	u64			min_vruntimex;
+#endif
 #ifndef CONFIG_64BIT
 	u64			min_vruntime_copy;
 #endif
@@ -2804,6 +2803,9 @@ extern void add_new_task_to_grp(struct task_struct *new);
 #define FULL_THROTTLE_BOOST 1
 #define CONSERVATIVE_BOOST 2
 #define RESTRAINED_BOOST 3
+#ifdef CONFIG_MIHW
+#define MI_BOOST         4
+#endif
 #define FULL_THROTTLE_BOOST_DISABLE -1
 #define CONSERVATIVE_BOOST_DISABLE -2
 #define RESTRAINED_BOOST_DISABLE -3
@@ -2950,6 +2952,14 @@ static inline int sched_boost(void)
 	return sched_boost_type;
 }
 
+#ifdef CONFIG_MIHW
+extern unsigned int mi_sched_boost;
+static inline int sched_mi_boost(void)
+{
+	return mi_sched_boost;
+}
+#endif
+
 static inline bool rt_boost_on_big(void)
 {
 	return sched_boost() == FULL_THROTTLE_BOOST ?
@@ -2961,6 +2971,9 @@ static inline bool is_full_throttle_boost(void)
 	return sched_boost() == FULL_THROTTLE_BOOST;
 }
 
+#ifdef CONFIG_MIHW
+extern bool sched_boost_top_app(void);
+#endif
 extern int preferred_cluster(struct sched_cluster *cluster,
 						struct task_struct *p);
 extern struct sched_cluster *rq_cluster(struct rq *rq);
@@ -3107,6 +3120,13 @@ static inline bool is_full_throttle_boost(void)
 {
 	return false;
 }
+
+#ifdef CONFIG_MIHW
+static inline bool sched_boost_top_app(void)
+{
+	return false;
+}
+#endif
 
 static inline enum sched_boost_policy task_boost_policy(struct task_struct *p)
 {

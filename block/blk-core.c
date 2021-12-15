@@ -470,7 +470,9 @@ inline void __blk_run_queue_uncond(struct request_queue *q)
 	 * can wait until all these request_fn calls have finished.
 	 */
 	q->request_fn_active++;
+	preempt_disable();
 	q->request_fn(q);
+	preempt_enable();
 	q->request_fn_active--;
 }
 EXPORT_SYMBOL_GPL(__blk_run_queue_uncond);
@@ -1616,6 +1618,41 @@ static struct request *blk_old_get_request(struct request_queue *q,
 	rq->bio = rq->biotail = NULL;
 	return rq;
 }
+/* flags: BLK_MQ_REQ_PREEMPT and/or BLK_MQ_REQ_NOWAIT. */
+struct request *blk_old_get_request_no_ioc(struct request_queue *q,
+                               unsigned int op, blk_mq_req_flags_t flags)
+{
+       struct request *rq;
+       gfp_t gfp_mask = flags & BLK_MQ_REQ_NOWAIT ? GFP_ATOMIC : GFP_NOIO;
+       int ret = 0;
+
+       WARN_ON_ONCE(q->mq_ops);
+
+       ret = blk_queue_enter(q, flags);
+       if (ret)
+               return ERR_PTR(ret);
+       spin_lock_irq(q->queue_lock);
+       rq = get_request(q, op, NULL, flags, gfp_mask);
+       if (IS_ERR(rq)) {
+               spin_unlock_irq(q->queue_lock);
+               blk_queue_exit(q);
+               return rq;
+       }
+
+       /* q->queue_lock is unlocked at this point */
+       rq->__data_len = 0;
+       rq->__sector = (sector_t) -1;
+#ifdef CONFIG_PFK
+       rq->__dun = 0;
+#endif
+       rq->bio = rq->biotail = NULL;
+
+       if (!IS_ERR(rq) && q->initialize_rq_fn)
+               q->initialize_rq_fn(rq);
+
+       return rq;
+}
+EXPORT_SYMBOL(blk_old_get_request_no_ioc);
 
 /**
  * blk_get_request - allocate a request
@@ -1998,6 +2035,12 @@ void blk_init_request_from_bio(struct request *req, struct bio *bio)
 	else
 		req->ioprio = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_NONE, 0);
 	req->write_hint = bio->bi_write_hint;
+
+#ifdef CONFIG_PERF_HUMANTASK
+	if (bio->human_task)
+		req->ioprio = 0;
+#endif
+
 	blk_rq_bio_prep(req->q, req, bio);
 }
 EXPORT_SYMBOL_GPL(blk_init_request_from_bio);
@@ -2094,6 +2137,10 @@ get_rq:
 	 */
 	blk_init_request_from_bio(req, bio);
 
+#ifdef CONFIG_PERF_HUMANTASK
+	if (bio->human_task)
+		where = ELEVATOR_INSERT_FRONT;
+#endif
 	if (test_bit(QUEUE_FLAG_SAME_COMP, &q->queue_flags))
 		req->cpu = raw_smp_processor_id();
 

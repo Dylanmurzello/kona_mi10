@@ -69,11 +69,20 @@
 #include <linux/nmi.h>
 #include <linux/khugepaged.h>
 #include <linux/psi.h>
+#include <linux/delayacct.h>
 
 #include <asm/sections.h>
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
 #include "internal.h"
+
+#ifdef CONFIG_KPERFEVENTS
+#include <linux/kperfevents.h>
+#undef CREATE_TRACE_POINTS
+#include <trace/events/kperfevents_mm.h>
+#define CREATE_TRACE_POINTS
+DEFINE_TRACE(kperfevents_mm_slowpath);
+#endif
 
 /* prevent >1 _updater_ of zone percpu pageset ->high and ->batch fields */
 static DEFINE_MUTEX(pcp_batch_high_lock);
@@ -332,7 +341,7 @@ int user_min_free_kbytes = -1;
  */
 int watermark_boost_factor __read_mostly;
 #else
-int watermark_boost_factor __read_mostly = 15000;
+int watermark_boost_factor __read_mostly = 0;
 #endif
 int watermark_scale_factor = 10;
 
@@ -936,7 +945,7 @@ static inline void __free_one_page(struct page *page,
 	unsigned int max_order;
 	struct capture_control *capc = task_capc(zone);
 
-	max_order = min_t(unsigned int, MAX_ORDER, pageblock_order + 1);
+	max_order = min_t(unsigned int, MAX_ORDER - 1, pageblock_order);
 
 	VM_BUG_ON(!zone_is_initialized(zone));
 	VM_BUG_ON_PAGE(page->flags & PAGE_FLAGS_CHECK_AT_PREP, page);
@@ -949,12 +958,13 @@ static inline void __free_one_page(struct page *page,
 	VM_BUG_ON_PAGE(bad_range(zone, page), page);
 
 continue_merging:
-	while (order < max_order - 1) {
+	while (order < max_order) {
 		if (compaction_capture(capc, page, order, migratetype)) {
 			__mod_zone_freepage_state(zone, -(1 << order),
 								migratetype);
 			return;
 		}
+
 		buddy_pfn = __find_buddy_pfn(pfn, order);
 		buddy = page + (buddy_pfn - pfn);
 
@@ -978,7 +988,7 @@ continue_merging:
 		pfn = combined_pfn;
 		order++;
 	}
-	if (max_order < MAX_ORDER) {
+	if (order < MAX_ORDER - 1) {
 		/* If we are here, it means order is >= pageblock_order.
 		 * We want to prevent merge between freepages on isolate
 		 * pageblock and normal pageblock. Without this, pageblock
@@ -999,7 +1009,7 @@ continue_merging:
 						is_migrate_isolate(buddy_mt)))
 				goto done_merging;
 		}
-		max_order++;
+		max_order = order + 1;
 		goto continue_merging;
 	}
 
@@ -1144,8 +1154,11 @@ static void kernel_init_free_pages(struct page *page, int numpages)
 {
 	int i;
 
+	/* s390's use of memset() could override KASAN redzones. */
+	kasan_disable_current();
 	for (i = 0; i < numpages; i++)
 		clear_highpage(page + i);
+	kasan_enable_current();
 }
 
 static __always_inline bool free_pages_prepare(struct page *page,
@@ -4827,6 +4840,8 @@ __alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order, int preferred_nid,
 	struct page *page;
 	unsigned int alloc_flags = ALLOC_WMARK_LOW;
 	gfp_t alloc_mask; /* The gfp_t that was actually used for allocation */
+	u64 start_time, duration;
+	u64 start_uptime, spent_duration;
 	struct alloc_context ac = { };
 
 	/*
@@ -4872,7 +4887,26 @@ __alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order, int preferred_nid,
 	if (unlikely(ac.nodemask != nodemask))
 		ac.nodemask = nodemask;
 
+	start_uptime = ktime_get_ns();
+	start_time = current->stime;
+	delayacct_slowpath_start();
 	page = __alloc_pages_slowpath(alloc_mask, order, &ac);
+	delayacct_slowpath_end();
+	duration = current->stime - start_time;
+	spent_duration = ktime_get_ns() - start_uptime;
+
+#ifdef CONFIG_KPERFEVENTS
+	if (unlikely(is_above_kperfevents_threshold_nanos(spent_duration))) {
+#ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
+		trace_kperfevents_mm_slowpath(order, duration, spent_duration);
+#else
+		/* The difference between start_time and end_time are jiffies. For e.g.
+		 * duration * (NSEC_PER_SEC / HZ)
+		 */
+		trace_kperfevents_mm_slowpath(order, ((duration << 30) / HZ), spent_duration);
+#endif
+	}
+#endif /* CONFIG_KPERFEVENTS */
 
 out:
 	if (memcg_kmem_enabled() && (gfp_mask & __GFP_ACCOUNT) && page &&
@@ -5009,6 +5043,11 @@ refill:
 
 		if (!page_ref_sub_and_test(page, nc->pagecnt_bias))
 			goto refill;
+
+		if (unlikely(nc->pfmemalloc)) {
+			free_the_page(page, compound_order(page));
+			goto refill;
+		}
 
 #if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
 		/* if size can vary use size else just use PAGE_SIZE */

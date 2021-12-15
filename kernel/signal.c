@@ -47,6 +47,10 @@
 #include <linux/capability.h>
 #include <linux/cgroup.h>
 
+#ifdef CONFIG_MILLET
+#include <linux/millet.h>
+#endif
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/signal.h>
 
@@ -1270,6 +1274,20 @@ int do_send_sig_info(int sig, struct siginfo *info, struct task_struct *p,
 	unsigned long flags;
 	int ret = -ESRCH;
 
+#ifdef CONFIG_MILLET
+	struct millet_data data;
+
+	if (sig == SIGKILL
+		|| sig == SIGTERM
+		|| sig == SIGABRT
+		|| sig == SIGQUIT) {
+
+		data.mod.k_priv.sig.caller_task = current;
+		data.mod.k_priv.sig.killed_task = p;
+		data.mod.k_priv.sig.reason = KILLED_BY_PRO;
+		millet_sendmsg(SIG_TYPE, p, &data);
+	}
+#endif
 	if (lock_task_sighand(p, &flags)) {
 		ret = send_signal(sig, info, p, type);
 		unlock_task_sighand(p, &flags);
@@ -2031,15 +2049,6 @@ static inline bool may_ptrace_stop(void)
 	return true;
 }
 
-/*
- * Return non-zero if there is a SIGKILL that should be waking us up.
- * Called with the siglock held.
- */
-static bool sigkill_pending(struct task_struct *tsk)
-{
-	return sigismember(&tsk->pending.signal, SIGKILL) ||
-	       sigismember(&tsk->signal->shared_pending.signal, SIGKILL);
-}
 
 /*
  * This must be called with current->sighand->siglock held.
@@ -2066,17 +2075,16 @@ static void ptrace_stop(int exit_code, int why, int clear_code, siginfo_t *info)
 		 * calling arch_ptrace_stop, so we must release it now.
 		 * To preserve proper semantics, we must do this before
 		 * any signal bookkeeping like checking group_stop_count.
-		 * Meanwhile, a SIGKILL could come in before we retake the
-		 * siglock.  That must prevent us from sleeping in TASK_TRACED.
-		 * So after regaining the lock, we must check for SIGKILL.
 		 */
 		spin_unlock_irq(&current->sighand->siglock);
 		arch_ptrace_stop(exit_code, info);
 		spin_lock_irq(&current->sighand->siglock);
-		if (sigkill_pending(current))
-			return;
 	}
 
+	/*
+	 * schedule() will not sleep if there is a pending signal that
+	 * can awaken the task.
+	 */
 	set_special_state(TASK_TRACED);
 
 	/*
@@ -4248,6 +4256,42 @@ __weak const char *arch_vma_name(struct vm_area_struct *vma)
 	return NULL;
 }
 
+#ifdef CONFIG_MILLET
+int last_report_task;
+
+static int signals_sendmsg(struct task_struct *tsk,
+		struct millet_data *data, struct millet_sock *sk)
+{
+	int ret = 0;
+
+	if (!sk || !data || !tsk) {
+		pr_err("%s input invalid\n", __FUNCTION__);
+		return RET_ERR;
+	}
+
+	data->mod.k_priv.sig.killed_pid = task_tgid_nr(tsk);
+	data->uid = task_uid(tsk).val;
+	data->msg_type = MSG_TO_USER;
+	data->owner = SIG_TYPE;
+
+	if (frozen_task_group(tsk)
+		&& (data->mod.k_priv.sig.killed_pid != *(int *)sk->mod[SIG_TYPE].priv)) {
+		*(int *)sk->mod[SIG_TYPE].priv = data->mod.k_priv.sig.killed_pid;
+		ret = millet_sendto_user(tsk, data, sk);
+	}
+
+	return ret;
+}
+
+static void signas_init_millet(struct millet_sock *sk)
+{
+	if (sk) {
+		sk->mod[SIG_TYPE].monitor = SIG_TYPE;
+		sk->mod[SIG_TYPE].priv = (void *)&last_report_task;
+	}
+}
+#endif
+
 void __init signals_init(void)
 {
 	/* If this check fails, the __ARCH_SI_PREAMBLE_SIZE value is wrong! */
@@ -4256,6 +4300,10 @@ void __init signals_init(void)
 	BUILD_BUG_ON(sizeof(struct siginfo) != SI_MAX_SIZE);
 
 	sigqueue_cachep = KMEM_CACHE(sigqueue, SLAB_PANIC);
+#ifdef CONFIG_MILLET
+	register_millet_hook(SIG_TYPE, NULL,
+		signals_sendmsg, signas_init_millet);
+#endif
 }
 
 #ifdef CONFIG_KGDB_KDB

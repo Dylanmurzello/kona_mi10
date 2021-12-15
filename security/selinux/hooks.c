@@ -100,7 +100,7 @@
 #include "audit.h"
 #include "avc_ss.h"
 
-struct selinux_state selinux_state __rticdata;
+struct selinux_state selinux_state;
 
 /* SECMARK reference count */
 static atomic_t selinux_secmark_refcount = ATOMIC_INIT(0);
@@ -872,6 +872,7 @@ static int selinux_set_mnt_opts(struct super_block *sb,
 	    !strcmp(sb->s_type->name, "sysfs") ||
 	    !strcmp(sb->s_type->name, "pstore") ||
 	    !strcmp(sb->s_type->name, "binder") ||
+	    !strcmp(sb->s_type->name, "bpf") ||
 	    !strcmp(sb->s_type->name, "cgroup") ||
 	    !strcmp(sb->s_type->name, "cgroup2"))
 		sbsec->flags |= SE_SBGENFS;
@@ -1225,33 +1226,6 @@ out_err:
 	kfree(defcontext);
 	kfree(fscontext);
 	kfree(rootcontext);
-	return rc;
-}
-/*
- * string mount options parsing and call set the sbsec
- */
-static int superblock_doinit(struct super_block *sb, void *data)
-{
-	int rc = 0;
-	char *options = data;
-	struct security_mnt_opts opts;
-
-	security_init_mnt_opts(&opts);
-
-	if (!data)
-		goto out;
-
-	BUG_ON(sb->s_type->fs_flags & FS_BINARY_MOUNTDATA);
-
-	rc = selinux_parse_opts_str(options, &opts);
-	if (rc)
-		goto out_err;
-
-out:
-	rc = selinux_set_mnt_opts(sb, &opts, 0, NULL);
-
-out_err:
-	security_free_mnt_opts(&opts);
 	return rc;
 }
 
@@ -1619,7 +1593,7 @@ static int inode_doinit_with_dentry(struct inode *inode, struct dentry *opt_dent
 			 * inode_doinit with a dentry, before these inodes could
 			 * be used again by userspace.
 			 */
-			goto out;
+			goto out_invalid;
 		}
 
 		len = INITCONTEXTLEN;
@@ -1735,7 +1709,7 @@ static int inode_doinit_with_dentry(struct inode *inode, struct dentry *opt_dent
 			 * could be used again by userspace.
 			 */
 			if (!dentry)
-				goto out;
+				goto out_invalid;
 			rc = selinux_genfs_get_sid(dentry, sclass,
 						   sbsec->flags, &sid);
 			dput(dentry);
@@ -1748,11 +1722,10 @@ static int inode_doinit_with_dentry(struct inode *inode, struct dentry *opt_dent
 out:
 	spin_lock(&isec->lock);
 	if (isec->initialized == LABEL_PENDING) {
-		if (!sid || rc) {
+		if (rc) {
 			isec->initialized = LABEL_INVALID;
 			goto out_unlock;
 		}
-
 		isec->initialized = LABEL_INITIALIZED;
 		isec->sid = sid;
 	}
@@ -1760,6 +1733,15 @@ out:
 out_unlock:
 	spin_unlock(&isec->lock);
 	return rc;
+
+out_invalid:
+	spin_lock(&isec->lock);
+	if (isec->initialized == LABEL_PENDING) {
+		isec->initialized = LABEL_INVALID;
+		isec->sid = sid;
+	}
+	spin_unlock(&isec->lock);
+	return 0;
 }
 
 /* Convert a Linux signal to an access vector. */
@@ -2211,22 +2193,19 @@ static inline u32 open_file_to_av(struct file *file)
 
 /* Hook functions begin here. */
 
-static int selinux_binder_set_context_mgr(struct task_struct *mgr)
+static int selinux_binder_set_context_mgr(const struct cred *mgr)
 {
-	u32 mysid = current_sid();
-	u32 mgrsid = task_sid(mgr);
-
 	return avc_has_perm(&selinux_state,
-			    mysid, mgrsid, SECCLASS_BINDER,
+			    current_sid(), cred_sid(mgr), SECCLASS_BINDER,
 			    BINDER__SET_CONTEXT_MGR, NULL);
 }
 
-static int selinux_binder_transaction(struct task_struct *from,
-				      struct task_struct *to)
+static int selinux_binder_transaction(const struct cred *from,
+				      const struct cred *to)
 {
 	u32 mysid = current_sid();
-	u32 fromsid = task_sid(from);
-	u32 tosid = task_sid(to);
+	u32 fromsid = cred_sid(from);
+	u32 tosid = cred_sid(to);
 	int rc;
 
 	if (mysid != fromsid) {
@@ -2237,27 +2216,24 @@ static int selinux_binder_transaction(struct task_struct *from,
 			return rc;
 	}
 
-	return avc_has_perm(&selinux_state,
-			    fromsid, tosid, SECCLASS_BINDER, BINDER__CALL,
-			    NULL);
+	return avc_has_perm(&selinux_state, fromsid, tosid,
+			    SECCLASS_BINDER, BINDER__CALL, NULL);
 }
 
-static int selinux_binder_transfer_binder(struct task_struct *from,
-					  struct task_struct *to)
+static int selinux_binder_transfer_binder(const struct cred *from,
+					  const struct cred *to)
 {
-	u32 fromsid = task_sid(from);
-	u32 tosid = task_sid(to);
-
 	return avc_has_perm(&selinux_state,
-			    fromsid, tosid, SECCLASS_BINDER, BINDER__TRANSFER,
+			    cred_sid(from), cred_sid(to),
+			    SECCLASS_BINDER, BINDER__TRANSFER,
 			    NULL);
 }
 
-static int selinux_binder_transfer_file(struct task_struct *from,
-					struct task_struct *to,
+static int selinux_binder_transfer_file(const struct cred *from,
+					const struct cred *to,
 					struct file *file)
 {
-	u32 sid = task_sid(to);
+	u32 sid = cred_sid(to);
 	struct file_security_struct *fsec = file->f_security;
 	struct dentry *dentry = file->f_path.dentry;
 	struct inode_security_struct *isec;
@@ -2864,39 +2840,22 @@ out:
 	return rc;
 }
 
-static int selinux_sb_remount(struct super_block *sb, void *data)
+static int selinux_sb_remount(struct super_block *sb,
+			      struct security_mnt_opts *opts)
 {
-	int rc, i, *flags;
-	struct security_mnt_opts opts;
-	char *secdata, **mount_options;
+	int i, *flags;
+	char **mount_options;
 	struct superblock_security_struct *sbsec = sb->s_security;
 
 	if (!(sbsec->flags & SE_SBINITIALIZED))
 		return 0;
 
-	if (!data)
-		return 0;
+	mount_options = opts->mnt_opts;
+	flags = opts->mnt_opts_flags;
 
-	if (sb->s_type->fs_flags & FS_BINARY_MOUNTDATA)
-		return 0;
-
-	security_init_mnt_opts(&opts);
-	secdata = alloc_secdata();
-	if (!secdata)
-		return -ENOMEM;
-	rc = selinux_sb_copy_data(data, secdata);
-	if (rc)
-		goto out_free_secdata;
-
-	rc = selinux_parse_opts_str(secdata, &opts);
-	if (rc)
-		goto out_free_secdata;
-
-	mount_options = opts.mnt_opts;
-	flags = opts.mnt_opts_flags;
-
-	for (i = 0; i < opts.num_mnt_opts; i++) {
+	for (i = 0; i < opts->num_mnt_opts; i++) {
 		u32 sid;
+		int rc;
 
 		if (flags[i] == SBLABEL_MNT)
 			continue;
@@ -2907,9 +2866,8 @@ static int selinux_sb_remount(struct super_block *sb, void *data)
 			pr_warn("SELinux: security_context_str_to_sid"
 			       "(%s) failed for (dev %s, type %s) errno=%d\n",
 			       mount_options[i], sb->s_id, sb->s_type->name, rc);
-			goto out_free_opts;
+			return rc;
 		}
-		rc = -EINVAL;
 		switch (flags[i]) {
 		case FSCONTEXT_MNT:
 			if (bad_option(sbsec, FSCONTEXT_MNT, sbsec->sid, sid))
@@ -2932,30 +2890,26 @@ static int selinux_sb_remount(struct super_block *sb, void *data)
 				goto out_bad_option;
 			break;
 		default:
-			goto out_free_opts;
+			return -EINVAL;
 		}
 	}
+	return 0;
 
-	rc = 0;
-out_free_opts:
-	security_free_mnt_opts(&opts);
-out_free_secdata:
-	free_secdata(secdata);
-	return rc;
 out_bad_option:
 	pr_warn("SELinux: unable to change security options "
 	       "during remount (dev %s, type=%s)\n", sb->s_id,
 	       sb->s_type->name);
-	goto out_free_opts;
+	return -EINVAL;
 }
 
-static int selinux_sb_kern_mount(struct super_block *sb, int flags, void *data)
+static int selinux_sb_kern_mount(struct super_block *sb, int flags,
+				 struct security_mnt_opts *opts)
 {
 	const struct cred *cred = current_cred();
 	struct common_audit_data ad;
 	int rc;
 
-	rc = superblock_doinit(sb, data);
+	rc = selinux_set_mnt_opts(sb, opts, 0, NULL);
 	if (rc)
 		return rc;
 
@@ -7340,7 +7294,11 @@ static __init int selinux_init(void)
 
 static void delayed_superblock_init(struct super_block *sb, void *unused)
 {
-	superblock_doinit(sb, NULL);
+	struct security_mnt_opts opts;
+
+	security_init_mnt_opts(&opts);
+	selinux_set_mnt_opts(sb, &opts, 0, NULL);
+	security_free_mnt_opts(&opts);
 }
 
 void selinux_complete_init(void)

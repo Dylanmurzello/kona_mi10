@@ -1778,7 +1778,7 @@ static int dwc3_resume_common(struct dwc3 *dwc, pm_message_t msg)
 		if (PMSG_IS_AUTO(msg))
 			break;
 
-		ret = dwc3_core_init(dwc);
+		ret = dwc3_core_init_for_resume(dwc);
 		if (ret)
 			return ret;
 
@@ -1982,6 +1982,7 @@ static struct platform_driver dwc3_driver = {
 		.of_match_table	= of_match_ptr(of_dwc3_match),
 		.acpi_match_table = ACPI_PTR(dwc3_acpi_match),
 		.pm	= &dwc3_dev_pm_ops,
+		.probe_type = PROBE_FORCE_SYNCHRONOUS,
 	},
 };
 

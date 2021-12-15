@@ -585,7 +585,7 @@ static u8 encode_bMaxPower(enum usb_device_speed speed,
 {
 	unsigned val;
 
-	if (c->MaxPower)
+	if (c->MaxPower || (c->bmAttributes & USB_CONFIG_ATT_SELFPOWER))
 		val = c->MaxPower;
 	else
 		val = CONFIG_USB_GADGET_VBUS_DRAW;
@@ -789,7 +789,7 @@ static int bos_desc(struct usb_composite_dev *cdev)
 	usb_ext->bLength = USB_DT_USB_EXT_CAP_SIZE;
 	usb_ext->bDescriptorType = USB_DT_DEVICE_CAPABILITY;
 	usb_ext->bDevCapabilityType = USB_CAP_TYPE_EXT;
-	usb_ext->bmAttributes = cpu_to_le32(USB_LPM_SUPPORT | USB_BESL_SUPPORT);
+	usb_ext->bmAttributes = cpu_to_le32(0);
 
 	/*
 	 * The Superspeed USB Capability descriptor shall be implemented by all
@@ -1004,7 +1004,11 @@ static int set_config(struct usb_composite_dev *cdev,
 	}
 
 	/* when we return, be sure our power usage is valid */
-	power = c->MaxPower ? c->MaxPower : CONFIG_USB_GADGET_VBUS_DRAW;
+	if (c->MaxPower || (c->bmAttributes & USB_CONFIG_ATT_SELFPOWER))
+		power = c->MaxPower;
+	else
+		power = CONFIG_USB_GADGET_VBUS_DRAW;
+
 	if (gadget->speed < USB_SPEED_SUPER)
 		power = min(power, 500U);
 	else
@@ -1190,7 +1194,7 @@ static void collect_langs(struct usb_gadget_strings **sp, __le16 *buf)
 	while (*sp) {
 		s = *sp;
 		language = cpu_to_le16(s->language);
-		for (tmp = buf; *tmp && tmp < &buf[126]; tmp++) {
+		for (tmp = buf; *tmp && tmp < &buf[USB_MAX_STRING_LEN]; tmp++) {
 			if (*tmp == language)
 				goto repeat;
 		}
@@ -1265,7 +1269,7 @@ static int get_string(struct usb_composite_dev *cdev,
 			collect_langs(sp, s->wData);
 		}
 
-		for (len = 0; len <= 126 && s->wData[len]; len++)
+		for (len = 0; len <= USB_MAX_STRING_LEN && s->wData[len]; len++)
 			continue;
 		if (!len)
 			return -EINVAL;
@@ -1784,12 +1788,10 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 					cdev->desc.bcdUSB = cpu_to_le16(0x0320);
 					cdev->desc.bMaxPacketSize0 = 9;
 				} else {
-					cdev->desc.bcdUSB = cpu_to_le16(0x0210);
+					cdev->desc.bcdUSB = cpu_to_le16(0x0200);
 				}
 			} else {
 				if (gadget->lpm_capable)
-					cdev->desc.bcdUSB = cpu_to_le16(0x0201);
-				else
 					cdev->desc.bcdUSB = cpu_to_le16(0x0200);
 			}
 

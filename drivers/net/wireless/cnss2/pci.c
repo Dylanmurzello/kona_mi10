@@ -1261,10 +1261,13 @@ static int cnss_pci_set_mhi_state(struct cnss_pci_data *pci_priv,
 		break;
 	case CNSS_MHI_RESUME:
 		mutex_lock(&pci_priv->mhi_ctrl->pm_mutex);
-		if (pci_priv->drv_connected_last)
+		if (pci_priv->drv_connected_last) {
+			cnss_pci_prevent_l1(&pci_priv->pci_dev->dev);
 			ret = mhi_pm_fast_resume(pci_priv->mhi_ctrl, true);
-		else
+			cnss_pci_allow_l1(&pci_priv->pci_dev->dev);
+		} else {
 			ret = mhi_pm_resume(pci_priv->mhi_ctrl);
+		}
 		mutex_unlock(&pci_priv->mhi_ctrl->pm_mutex);
 		break;
 	case CNSS_MHI_TRIGGER_RDDM:
@@ -3799,7 +3802,7 @@ int cnss_smmu_map(struct device *dev,
 
 	pci_priv->smmu_iova_ipa_current = iova + len;
 	*iova_addr = (uint32_t)(iova + paddr - rounddown(paddr, PAGE_SIZE));
-	cnss_pr_dbg("IOMMU map: iova_addr %lx\n", *iova_addr);
+	cnss_pr_dbg("IOMMU map: iova_addr %x\n", *iova_addr);
 
 	return 0;
 }
@@ -4577,7 +4580,7 @@ static int cnss_pci_update_fw_name(struct cnss_pci_data *pci_priv)
 	switch (pci_priv->device_id) {
 	case QCA6390_DEVICE_ID:
 		if (plat_priv->device_version.major_version < FW_V2_NUMBER) {
-			cnss_pr_dbg("Device ID:version (0x%lx:%d) is not supported\n",
+			cnss_pr_dbg("Device ID:version (0x%x:%d) is not supported\n",
 				    pci_priv->device_id,
 				    plat_priv->device_version.major_version);
 			return -EINVAL;

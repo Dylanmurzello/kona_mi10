@@ -693,6 +693,45 @@ DEFINE_EVENT(sched_stat_runtime, sched_stat_runtime,
 	     TP_PROTO(struct task_struct *tsk, u64 runtime, u64 vruntime),
 	     TP_ARGS(tsk, runtime, vruntime));
 
+/* debug sched event of EAS for tracer: nop  */
+TRACE_EVENT(sched_debug_einfo,
+		TP_PROTO(struct task_struct *tsk,const char *  flag1,const char *  flag2,unsigned int param1, unsigned int param2,u64 se_vr, u64 en_vr,u64 cfq_min_vr),
+		TP_ARGS(tsk,flag1,flag2,param1,param2, se_vr,en_vr,cfq_min_vr),
+		TP_STRUCT__entry(
+			__array( char,	comm,	TASK_COMM_LEN	)
+			__field( pid_t,	pid			)
+			__array( char,	flag1,	TASK_COMM_LEN)
+			__array( char,	flag2,	TASK_COMM_LEN)
+			__field(unsigned int, param1    )
+			__field( unsigned int,	param2)
+			__field( u64,	se_vr )
+			__field( u64,	en_vr )
+			__field( u64,	cfq_min_vr )
+			),
+
+		TP_fast_assign(
+			memcpy(__entry->comm, tsk->comm, TASK_COMM_LEN);
+			__entry->pid		= tsk->pid;
+			memcpy(__entry->flag1, flag1, TASK_COMM_LEN);
+			memcpy(__entry->flag2, flag2, TASK_COMM_LEN);
+			__entry->param1 = param1;
+			__entry->param2 = param2;
+			__entry->se_vr  = se_vr;
+			__entry->en_vr = en_vr;
+			__entry->cfq_min_vr = cfq_min_vr;
+			),
+
+		TP_printk("comm=%s pid=%d,  %s=%d  %s=%d ,  sv=%Lu [ns] ev=%Lu [ns] cv=%Lu [ns]", __entry->comm, __entry->pid,
+				__entry->flag1,
+				__entry->param1,
+				__entry->flag2,
+				__entry->param2,
+				(unsigned long long)__entry->se_vr,
+				(unsigned long long)__entry->en_vr,
+				(unsigned long long)__entry->cfq_min_vr)
+		);
+
+
 /*
  * Tracepoint for showing priority inheritance modifying a tasks
  * priority.
@@ -1209,7 +1248,7 @@ TRACE_EVENT(sched_compute_energy,
 		__entry->best_energy	        = best_energy;
 	),
 
-	TP_printk("pid=%d comm=%s util=%lu prev_cpu=%d prev_energy=%llu eval_cpu=%d eval_energy=%llu best_energy_cpu=%d best_energy=%llu",
+	TP_printk("pid=%d comm=%s util=%lu prev_cpu=%d prev_energy=%lu eval_cpu=%d eval_energy=%lu best_energy_cpu=%d best_energy=%lu",
 		__entry->pid, __entry->comm, __entry->util, __entry->prev_cpu,
 		__entry->prev_energy, __entry->eval_cpu, __entry->eval_energy,
 		__entry->best_energy_cpu, __entry->best_energy)

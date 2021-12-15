@@ -28,6 +28,11 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/sched.h>
 
+#undef CREATE_TRACE_POINTS
+#include <trace/events/kperfevents_sched.h>
+#define CREATE_TRACE_POINTS
+DEFINE_TRACE(kperfevents_sched_wait);
+
 DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 
 #ifdef CONFIG_SCHED_DEBUG
@@ -2480,6 +2485,9 @@ out:
 
 bool cpus_share_cache(int this_cpu, int that_cpu)
 {
+	if (this_cpu == that_cpu)
+		return true;
+
 	return per_cpu(sd_llc_id, this_cpu) == per_cpu(sd_llc_id, that_cpu);
 }
 #endif /* CONFIG_SMP */
@@ -5870,12 +5878,8 @@ static void do_sched_yield(void)
 	schedstat_inc(rq->yld_count);
 	current->sched_class->yield_task(rq);
 
-	/*
-	 * Since we are going to call schedule() anyway, there's
-	 * no need to preempt or enable interrupts:
-	 */
 	preempt_disable();
-	rq_unlock(rq, &rf);
+	rq_unlock_irq(rq, &rf);
 	sched_preempt_enable_no_resched();
 
 	schedule();
@@ -6287,6 +6291,34 @@ void show_state_filter(unsigned long state_filter)
 	 */
 	if (!state_filter)
 		debug_show_all_locks();
+}
+
+void show_state_filter_single(unsigned long state_filter)
+{
+	struct task_struct *g, *p;
+
+#if BITS_PER_LONG == 32
+	printk(KERN_INFO
+		"  task                PC stack   pid father\n");
+#else
+	printk(KERN_INFO
+		"  task                        PC stack   pid father\n");
+#endif
+	rcu_read_lock();
+	for_each_process_thread(g, p) {
+		/*
+		 * reset the NMI-timeout, listing all files on a slow
+		 * console might take a lot of time:
+		 * Also, reset softlockup watchdogs on all CPUs, because
+		 * another CPU might be blocked waiting for us to process
+		 * an IPI.
+		 */
+		touch_nmi_watchdog();
+		touch_all_softlockup_watchdogs();
+		if (p->state == state_filter)
+			sched_show_task(p);
+	}
+	rcu_read_unlock();
 }
 
 /**
@@ -8630,3 +8662,43 @@ void sched_exit(struct task_struct *p)
 #endif /* CONFIG_SCHED_WALT */
 
 __read_mostly bool sched_predl = 1;
+
+#ifdef CONFIG_MIHW
+inline bool is_critical_task(struct task_struct *p)
+{
+	return is_top_app(p) || is_inherit_top_app(p);
+}
+
+inline bool is_top_app(struct task_struct *p)
+{
+	return p && p->top_app > 0;
+}
+
+inline bool is_inherit_top_app(struct task_struct *p)
+{
+	return p && p->inherit_top_app > 0;
+}
+
+inline void set_inherit_top_app(struct task_struct *p,
+				struct task_struct *from)
+{
+	if (!p || !from)
+		return;
+	if (is_critical_task(p) || from->inherit_top_app >= INHERIT_DEPTH)
+		return;
+	p->inherit_top_app = from->inherit_top_app + 1;
+#ifdef CONFIG_PERF_HUMANTASK
+	p->human_task = 1;
+#endif
+}
+
+inline void restore_inherit_top_app(struct task_struct *p)
+{
+	if (p && is_inherit_top_app(p)) {
+		p->inherit_top_app = 0;
+#ifdef CONFIG_PERF_HUMANTASK
+		p->human_task  = 0 ;
+#endif
+	}
+}
+#endif /* CONFIG_MIHW */

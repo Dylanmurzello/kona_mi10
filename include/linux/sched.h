@@ -1378,6 +1378,14 @@ struct task_struct {
 	 */
 	u64				timer_slack_ns;
 	u64				default_timer_slack_ns;
+#ifdef CONFIG_MIHW
+	unsigned int			top_app;
+	unsigned int			inherit_top_app;
+#endif
+#ifdef CONFIG_PERF_HUMANTASK
+	unsigned int                    human_task;
+	unsigned int			cpux;
+#endif
 
 #ifdef CONFIG_KASAN
 	unsigned int			kasan_depth;
@@ -1478,8 +1486,37 @@ struct task_struct {
 	/* Used by LSM modules for access restriction: */
 	void				*security;
 #endif
+#ifdef CONFIG_KPERFEVENTS
+	/* lock to protect kperfevents */
+	rwlock_t kperfevents_lock;
+	/* perfevents of current task, only effective for group leader.
+	 * accessible for all tasks in one group.
+	 */
+	void *kperfevents;
+#endif
 	/* task is frozen/stopped (used by the cgroup freezer) */
 	ANDROID_KABI_USE(1, unsigned frozen:1);
+
+	/* 095444fad7e3 ("futex: Replace PF_EXITPIDONE with a state") */
+	ANDROID_KABI_USE(2, unsigned int futex_state);
+
+	/*
+	 * f9b0c6c556db ("futex: Add mutex around futex exit")
+	 * A struct mutex takes 32 bytes, or 4 64bit entries, so pick off
+	 * 4 of the reserved members, and replace them with a struct mutex.
+	 * Do the GENKSYMS hack to work around the CRC issues
+	 */
+#ifdef __GENKSYMS__
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
+	ANDROID_KABI_RESERVE(5);
+	ANDROID_KABI_RESERVE(6);
+#else
+	struct mutex			futex_exit_mutex;
+#endif
+
+	ANDROID_KABI_RESERVE(7);
+	ANDROID_KABI_RESERVE(8);
 
 	/*
 	 * New fields for task_struct should be added above here, so that
@@ -1657,7 +1694,6 @@ extern struct pid *cad_pid;
  */
 #define PF_IDLE			0x00000002	/* I am an IDLE thread */
 #define PF_EXITING		0x00000004	/* Getting shut down */
-#define PF_EXITPIDONE		0x00000008	/* PI exit done on shut down */
 #define PF_VCPU			0x00000010	/* I'm a virtual CPU */
 #define PF_WQ_WORKER		0x00000020	/* I'm a workqueue worker */
 #define PF_FORKNOEXEC		0x00000040	/* Forked but didn't exec */
@@ -1714,7 +1750,7 @@ extern struct pid *cad_pid;
 #define tsk_used_math(p)			((p)->flags & PF_USED_MATH)
 #define used_math()				tsk_used_math(current)
 
-static inline bool is_percpu_thread(void)
+static __always_inline bool is_percpu_thread(void)
 {
 #ifdef CONFIG_SMP
 	return (current->flags & PF_NO_SETAFFINITY) &&
@@ -2223,4 +2259,16 @@ static inline void set_wake_up_idle(bool enabled)
 		current->flags &= ~PF_WAKE_UP_IDLE;
 }
 
+#ifdef CONFIG_MIHW
+extern inline bool is_critical_task(struct task_struct *p);
+
+extern inline bool is_top_app(struct task_struct *p);
+
+extern inline bool is_inherit_top_app(struct task_struct *p);
+
+#define INHERIT_DEPTH 2
+extern inline void set_inherit_top_app(struct task_struct *p,
+					struct task_struct *from);
+extern inline void restore_inherit_top_app(struct task_struct *p);
+#endif /* CONFIG_MIHW */
 #endif

@@ -42,6 +42,9 @@
 
 #include <linux/fscrypt.h>
 #include <linux/fsverity.h>
+#ifdef CONFIG_FS_HPB
+#include <linux/fs_hpb.h>
+#endif
 
 #include <linux/compiler.h>
 
@@ -1587,6 +1590,10 @@ enum {
 	EXT4_STATE_EXT_PRECACHED,	/* extents have been precached */
 	EXT4_STATE_LUSTRE_EA_INODE,	/* Lustre-style ea_inode */
 	EXT4_STATE_VERITY_IN_PROGRESS,	/* building fs-verity Merkle tree */
+
+#ifdef CONFIG_FS_HPB
+	EXT4_STATE_HPB,			/* HPB I/O */
+#endif
 };
 
 #define EXT4_INODE_BIT_FNS(name, field, offset)				\
@@ -2522,7 +2529,8 @@ void ext4_insert_dentry(struct inode *dir, struct inode *inode,
 			struct ext4_filename *fname);
 static inline void ext4_update_dx_flag(struct inode *inode)
 {
-	if (!ext4_has_feature_dir_index(inode->i_sb)) {
+	if (!ext4_has_feature_dir_index(inode->i_sb) &&
+	    ext4_test_inode_flag(inode, EXT4_INODE_INDEX)) {
 		/* ext4_iget() should have caught this... */
 		WARN_ON_ONCE(ext4_has_feature_metadata_csum(inode->i_sb));
 		ext4_clear_inode_flag(inode, EXT4_INODE_INDEX);
@@ -3144,10 +3152,6 @@ static inline void ext4_unlock_group(struct super_block *sb,
 /* dir.c */
 extern const struct file_operations ext4_dir_operations;
 
-#ifdef CONFIG_UNICODE
-extern const struct dentry_operations ext4_dentry_ops;
-#endif
-
 /* file.c */
 extern const struct inode_operations ext4_file_inode_operations;
 extern const struct file_operations ext4_file_operations;
@@ -3282,9 +3286,9 @@ extern void ext4_release_system_zone(struct super_block *sb);
 extern int ext4_setup_system_zone(struct super_block *sb);
 extern int __init ext4_init_system_zone(void);
 extern void ext4_exit_system_zone(void);
-extern int ext4_data_block_valid(struct ext4_sb_info *sbi,
-				 ext4_fsblk_t start_blk,
-				 unsigned int count);
+extern int ext4_inode_block_valid(struct inode *inode,
+				  ext4_fsblk_t start_blk,
+				  unsigned int count);
 extern int ext4_check_blockref(const char *, unsigned int,
 			       struct inode *, __le32 *, unsigned int);
 

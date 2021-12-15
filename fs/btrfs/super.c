@@ -1472,20 +1472,7 @@ out:
 static int parse_security_options(char *orig_opts,
 				  struct security_mnt_opts *sec_opts)
 {
-	char *secdata = NULL;
-	int ret = 0;
-
-	secdata = alloc_secdata();
-	if (!secdata)
-		return -ENOMEM;
-	ret = security_sb_copy_data(orig_opts, secdata);
-	if (ret) {
-		free_secdata(secdata);
-		return ret;
-	}
-	ret = security_sb_parse_opts_str(secdata, sec_opts);
-	free_secdata(secdata);
-	return ret;
+	return security_sb_eat_lsm_opts(orig_opts, sec_opts);
 }
 
 static int setup_security_options(struct btrfs_fs_info *fs_info,
@@ -1844,6 +1831,14 @@ static int btrfs_remount(struct super_block *sb, int *flags, char *data)
 		btrfs_dev_replace_suspend_for_unmount(fs_info);
 		btrfs_scrub_cancel(fs_info);
 		btrfs_pause_balance(fs_info);
+
+		/*
+		 * Pause the qgroup rescan worker if it is running. We don't want
+		 * it to be still running after we are in RO mode, as after that,
+		 * by the time we unmount, it might have left a transaction open,
+		 * so we would leak the transaction and/or crash.
+		 */
+		btrfs_qgroup_wait_for_completion(fs_info, false);
 
 		ret = btrfs_commit_super(fs_info);
 		if (ret)

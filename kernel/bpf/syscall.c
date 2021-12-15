@@ -1,4 +1,5 @@
 /* Copyright (c) 2011-2014 PLUMgrid, http://plumgrid.com
+ * Copyright (C) 2021 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of version 2 of the GNU General Public
@@ -1367,8 +1368,13 @@ static int bpf_prog_load(union bpf_attr *attr)
 	if (CHECK_ATTR(BPF_PROG_LOAD))
 		return -EINVAL;
 
-	if (attr->prog_flags & ~BPF_F_STRICT_ALIGNMENT)
+	if (attr->prog_flags & ~(BPF_F_STRICT_ALIGNMENT | BPF_F_ANY_ALIGNMENT))
 		return -EINVAL;
+
+	if (!IS_ENABLED(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS) &&
+	    (attr->prog_flags & BPF_F_ANY_ALIGNMENT) &&
+	    !capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	/* copy eBPF program license from user space */
 	if (strncpy_from_user(license, u64_to_user_ptr(attr->license),
@@ -2376,6 +2382,31 @@ out:
 	return err;
 }
 
+static int bpf_get_comm_hash(union bpf_attr *attr)
+{
+	void __user *uhash = u64_to_user_ptr(attr->hash);
+	int pid = attr->pid;
+	struct task_struct *p_task = NULL;
+	const char *str;
+	int c;
+	u64 hash = 5381;
+
+	rcu_read_lock();
+	p_task = find_task_by_pid_ns(pid, &init_pid_ns);
+	if (p_task) {
+		get_task_struct(p_task);
+		str = p_task->comm;
+		while ((c = *str++))
+			hash = ((hash << 5) + hash) + c;
+		put_task_struct(p_task);
+	}
+	rcu_read_unlock();
+
+	if (copy_to_user(uhash, &hash, sizeof(hash)) != 0)
+		return -EFAULT;
+	return 0;
+}
+
 SYSCALL_DEFINE3(bpf, int, cmd, union bpf_attr __user *, uattr, unsigned int, size)
 {
 	union bpf_attr attr;
@@ -2463,6 +2494,9 @@ SYSCALL_DEFINE3(bpf, int, cmd, union bpf_attr __user *, uattr, unsigned int, siz
 		break;
 	case BPF_TASK_FD_QUERY:
 		err = bpf_task_fd_query(&attr, uattr);
+		break;
+	case BPF_GET_COMM_HASH:
+		err = bpf_get_comm_hash(&attr);
 		break;
 	default:
 		err = -EINVAL;
